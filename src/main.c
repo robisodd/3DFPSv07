@@ -29,7 +29,10 @@
         
   v0.7: Cleaned up mess
         Added comments to inform those how this thing kinda works
-  
+        ray.dist is now unsigned
+        raycasting is more optimized
+        Got rid of floor function?
+        
   To Do:
         See if "rendering all in 1 stroke color, then rendering again with 2nd" is faster
           e.g. draw all white points in a column then all black points
@@ -67,11 +70,10 @@
 #include "pebble.h"
 
 #define ACCEL_STEP_MS 10       // Update frequency
-#define root_depth 10          // How many iterations square root function performs. Less=faster but less accurate
 #define mapsize 90             // Map is 90x90 squares, or whatever number is here
 
-#define range 64 * 30          // Distance player can see - Pixels-per-square * #-of-squares
-#define idclip false           // Walk thru walls
+#define RANGE 64 * 30          // Distance player can see - Pixels-per-square * #-of-squares -- max 1024 squares due to (64*1024)^2 = 32bit max
+#define IDCLIP false           // Walk thru walls
 #define view_border true       // Draw border around viewing window
 #define draw_textbox true      // Draw textbox or not
 
@@ -127,7 +129,7 @@ static PlayerVar player;
 typedef struct RayVar {
   int32_t x;                  // Origin X
   int32_t y;                  // Origin Y
-  int32_t dist;               // Distance
+  uint32_t dist;              // Distance
   int8_t hit;                 // Hit (What on the map it hit)
   int32_t offset;             // Offset (used for wall texture)
 } RayVar;
@@ -144,9 +146,10 @@ int32_t colh=0;
 
 static int8_t map[mapsize * mapsize];  // int8 means cells can be from -128 to 127
 
-// Floor: (x>>6)<<6) and x&(-64), probably x&!63 too
+// Floor: (x>>6)<<6) and x&(-64), x&~63 too
+//http://ideone.com/YZhhGe
 int32_t floor_int(int32_t a){int32_t b=(a-a%64); if(b!=a) if(a<0)b-=64; return b;} // Floors to nearest multiple of 64
-int32_t  sqrt_int(int32_t a){int32_t b=a; for(int8_t i=0; i<root_depth; i++) b=(b+(a/b))/2; return b;} // Square Root
+int32_t  sqrt_int(int32_t a, int8_t root_depth) {int32_t b=a; for(int8_t i=0; i<root_depth; i++) b=(b+(a/b))/2; return b;} // Square Root
 int32_t   abs_int(int32_t a){return (a<0 ? 0 - a : a);} // Absolute Value
 //int32_t playerheight = 0;
 
@@ -177,8 +180,8 @@ void setmap(int32_t x, int32_t y, int8_t value) {
 void walk(int32_t distance) {
   int32_t dx = (cos_lookup(player.facing) * distance) / TRIG_MAX_RATIO;
   int32_t dy = (sin_lookup(player.facing) * distance) / TRIG_MAX_RATIO;
-  if(getmap(floor_int(player.x + dx), floor_int(player.y)) <= 0 || idclip) player.x += dx;
-  if(getmap(floor_int(player.x), floor_int(player.y + dy)) <= 0 || idclip) player.y += dy;
+  if(getmap(player.x + dx, player.y) <= 0 || IDCLIP) player.x += dx;
+  if(getmap(player.x, player.y + dy) <= 0 || IDCLIP) player.y += dy;
 }
 
 static void main_loop(void *data) {
@@ -189,6 +192,19 @@ static void main_loop(void *data) {
   layer_mark_dirty(graphics_layer);              // Tell pebble to draw when it's ready
 }
 
+//shoot_ray(x, y, angle)
+//  x, y = position on map to shoot the ray from
+//  angle = direction to shoot the ray (in Pebble angle notation)
+//returns: result and global variable ray
+//  result: end result of the function
+//         -1: Ray went longer than RANGE constant without hitting a block
+//          0: Ray went out of bounds of the map before hitting a block
+//          1: Successfully hit a block and stopped
+//  ray:
+//     ray.x, ray.y: position on map the ray hit
+//         ray.dist: lenght of the ray
+//          ray.hit: block type the ray hit
+//       ray.offset: horizontal spot on texture the ray hit [0-63]
 int32_t shoot_ray(int32_t x, int32_t y, int32_t angle) {
   int32_t sin, cos, result=0;
   int32_t Xdx=0, Xdy=0, Ydx=0, Ydy=0, Xlen, Ylen;
@@ -200,41 +216,38 @@ int32_t shoot_ray(int32_t x, int32_t y, int32_t angle) {
   bool going = true;  // Loop until something causes you to stop
     while(going) {
       // Calculate distance to next X gridline in the ray's direction
-      if (cos == 0)
-        Xlen = 2147483647;  // If ray is vertical, will never hit next X
+      if (cos == 0)  // If ray is vertical, will never hit next X
+        Xlen = 2147483647;  
       else {
-        Xdx = cos > 0 ? (floor_int(ray.x) - ray.x) + 64 : (floor_int(ray.x) - ray.x) - 1;
+        Xdx = cos > 0 ? 64 - (ray.x&63): -1 - (ray.x&63);
         Xdy = (Xdx * sin) / cos;
         Xlen = Xdx * Xdx + Xdy * Xdy;  // Multiplying 2 32bit numbers might overflow
-        if(Xlen<0) Xlen = 2147483647;  // Overflow detected: just make length the max
+        //if(Xlen<0) Xlen = 2147483647;  // Overflow detected: just make length the max
       }
 
       // Calculate distance to next Y gridline in the ray's direction
 	    if (sin == 0)
         Ylen = 2147483647;    // If ray is horizontal, will never hit next Y
 	    else {
-        Ydy = sin > 0 ? (floor_int(ray.y) - ray.y) + 64 : (floor_int(ray.y) - ray.y) - 1;
-	      Ydx = (Ydy * cos)/sin;
+        Ydy = sin > 0 ? 64 - (ray.y&63): -1 - (ray.y&63);
+        Ydx = (Ydy * cos) / sin;
         Ylen = Ydx * Ydx + Ydy * Ydy;  // Multiplying 2 32bit numbers might overflow
-        if(Ylen<0) Ylen = 2147483647;  // Overflow detected: just make length the max
+        //if(Ylen<0) Ylen = 2147483647;  // Overflow detected: just make length the max
       }
 
       // move ray to next step whichever is closer
 	    if(Xlen < Ylen) {
         ray.x += Xdx;
         ray.y += Xdy;
-	      //ray.hit = getmap(floor_int(ray.x - (cos<0?64:0)), floor_int(ray.y));
-        ray.hit = getmap(floor_int(ray.x), floor_int(ray.y));
-        ray.dist = ray.dist + sqrt_int(Xlen);
+        ray.dist = ray.dist + sqrt_int(Xlen,10); // sqrt not really needed til the end?
 	      ray.offset = ray.y;
       } else {
         ray.x += Ydx;
         ray.y += Ydy;
-        //ray.hit = getmap(floor_int(ray.x),floor_int(ray.y - (sin<0?64:0)));
-        ray.hit = getmap(floor_int(ray.x), floor_int(ray.y));
-        ray.dist = ray.dist + sqrt_int(Ylen);
+        ray.dist = ray.dist + sqrt_int(Ylen,10);
 	      ray.offset = ray.x;
 	    }
+      ray.hit = getmap(ray.x, ray.y);
 
 	    if (ray.hit > 0) {	   // if ray hits a wall (a block)
         if(ray.hit==4) {     // if it hit a [block type 4] = mirror block
@@ -248,7 +261,7 @@ int32_t shoot_ray(int32_t x, int32_t y, int32_t angle) {
       } // End if hit
 
       if((sin<0&&ray.y<0)||(sin>0&&ray.y>=(mapsize<<6))||(cos<0&&ray.x<0)||(cos>0&&ray.x>=(mapsize<<6))) { going=false; result = 0;} // stop if ray is out of bounds AND going wrong way result=0;
-      if(ray.dist > range) {result = -1; going=false;}  // Stop ray after traveling too far result=-1;
+      if(ray.dist > RANGE*RANGE) {result = -1; going=false;}  // Stop ray after traveling too far result=-1;
     } //End While
   return result;
 }
@@ -263,168 +276,6 @@ If going negative, linear length =  1 + (position & 63) (aka: len =  1 + pos%64)
 
 */
 
-/*
-int32_t shoot_ray2(int32_t StartX, int32_t StartY, int32_t angle) {
-  int32_t Xdx=0, Xdy=0, Ydx=0, Ydy=0, Xlen, Ylen;
-  int32_t sin, cos, result=0;
-  int32_t fincx, Ay, Xinc, Bx, By, Yinc;
-  
-  sin = sin_lookup(angle);
-  cos = cos_lookup(angle);
-  ray = (RayVar){.x=x, .y=y, .dist=0};
-
-  
-  PosX=StartX;
-  PosY=StartY;
-  / * Maybe try:
-  If cos = 0 or sin = 0
-    while(casting) { }
-  If cos>0
-   If sin>0
-    while(casting) { }
-   Else
-    while(casting) { }
-  else
-   If sin>0
-    while(casting) { }
-   Else
-    while(casting) { }
-  * /
-  while (casting) {
-    if(cos!=0 || sin!=0) {
-      if(sin>0) { // facing down Y+
-        Hdy = 64 - (PosY & 63);
-      } else { // facing up Y-
-        Hdy = 1 + (PosY & 63);
-      }
-      Hdx = (fDy * cos)/sin;
-      if(Hdx<0) Hdx = 0 - Hdx; // Absolute Value
-
-      //Next Vdx = abs (cos<<6)/sin;
-
-      if(cos>0) { // facing right X+
-        Vdx = 64 - (PosX & 63);
-      } else { // facing left X-
-        Vdx = 1 + (PosX & 63);
-      }
-      Vdy = (Vdx * sin)/cos;
-      if(Vdy<0) Vdy = 0 - Vdy; // Absolute Value
-
-      //Next Vdy = abs (sin<<6)/cos;
-  
-      if( ((Vdx*Vdx)+(Vdy*Vdy)) > ((Hdx*Hdx)+(Hdy*Hdy)) ) {
-        if(cos<0) PosX -= Hdx; else PosX += Hdx;
-        if(sin<0) PosY -= Hdy; else PosY += Hdy;
-      } else {
-        if(cos<0) PosX -= Vdx; else PosX += Vdx;
-        if(sin<0) PosY -= Vdy; else PosY += Vdy;
-      }
-
-    } else { // Either cos or sin = 0
-      if(cos==0){
-        if(sin>0)  // facing straight down Y+
-          PosY += 64 - (PosY & 63);
-        else  // facing straight up Y-
-          PosY -= 1 + (PosY & 63);
-      } else {    // sin==0, facing straight left or right
-        if(cos>0)  // facing straight right X+
-          PosX += 64 - (PosX & 63);
-         else  // facing straight left X-
-          PosX -= 1 + (PosX & 63);
-        
-      }
-    
-    }
-    
-    
-    
-  
-  
-  
-  
-  
-  // Find point A
-  //ay=((y>>6)<<6); if sin>0 ya=ya+64 else ya=ya-1
-  if(sin>0) { // facing down Y+
-    Ay = ((y>>6)++)<<6;
-  } else if(sin<0) { // facing up Y-
-    Ay = ((y>>6)<<6)--;
-  } else { // sin=0, Facing left or right
-    //ray.y = y;
-  }
-  FirstDy = (Ay - y)
-    ((Dy * cos)/sin);
-  MainDx = (cos<<6)/sin;
-  
-  if(cos>0) { // facing right X+
-    Ax = ((x>>6)++)<<6;
-  } else if(cos<0) { // facing left X-
-    Ax = ((x>>6)<<6)--;
-  } else { // sin=0, Facing up or down
-    //ray.y = y;
-  }
-  FirstDx = (Ax - x)
-  FirstYinc = ((Dx * sin)/cos);
-  MainXinc = (cos<<6)/sin;
-  
-  
-  
-    
-  bool going = true;  // Loop until something causes you to stop
-    while(going) {
-      // Calculate distance to next X gridline in the ray's direction
-      if (cos == 0)
-        Xlen = 2147483647;  // If ray is vertical, will never hit next X
-      else {
-	      Xdx = cos > 0 ? floor_int(ray.x + 64) - ray.x : ceil_int(ray.x - 64) - ray.x;
-        Xdy = (Xdx * sin)/cos;
-        Xlen = Xdx * Xdx + Xdy * Xdy;  // Multiplying 2 32bit numbers might overflow
-        if(Xlen<0) Xlen = 2147483647;  // Overflow detected so just make length the max
-      }
-
-      // Calculate distance to next Y gridline in the ray's direction
-	    if (sin == 0)
-        Ylen = 2147483647;    // If ray is horizontal, will never hit next Y
-	    else {
-        Ydy = sin > 0 ? floor_int(ray.y + 64) - ray.y : ceil_int(ray.y - 64) - ray.y;
-	      Ydx = (Ydy * cos)/sin;
-        Ylen = Ydx * Ydx + Ydy * Ydy;  // Multiplying 2 32bit numbers might overflow
-        if(Ylen<0) Ylen = 2147483647;  // Overflow detected so just make length the max
-      }
-
-      // move ray to next step whichever is closer
-	    if(Xlen < Ylen) {
-        ray.x += Xdx;
-        ray.y += Xdy;
-	      ray.hit = getmap(floor_int(ray.x - (cos<0?64:0)), floor_int(ray.y));
-        ray.dist = ray.dist + sqrt_int(Xlen);
-	      ray.offset = ray.y;
-      } else {
-        ray.x += Ydx;
-        ray.y += Ydy;
-        ray.hit = getmap(floor_int(ray.x),floor_int(ray.y - (sin<0?64:0)));
-        ray.dist = ray.dist + sqrt_int(Ylen);
-	      ray.offset = ray.x;
-	    }
-
-	    if (ray.hit > 0) {	   // if ray hits a wall
-        if(ray.hit==4) {     // if it hit a mirror
-            //graphics_context_set_stroke_color(ctx, 0); graphics_draw_line(ctx, GPoint((int)col + view_x, view_y + view_h/2 + colh), GPoint((int)col + view_x,view_y + view_h/2 - colh));  //Draw black line.  Cool for black block
-            if(Xlen < Ylen) cos = -1 * cos; else sin = -1 * sin;
-        } else {
-          going = false;       // stop ray
-          result = 1;
-          ray.offset &= 63;  // (was=ray.offset%64) Get fractional part of offset: offset is where on wall ray hits: 0-3(left) to 60-63(right)
-        } // End Else Mirror
-      } // End if hit
-
-      if((sin<0&&ray.y<0)||(sin>0&&ray.y>=(mapsize<<6))||(cos<0&&ray.x<0)||(cos>0&&ray.x>=(mapsize<<6))) { going=false; result = 0;} // stop if ray is out of bounds AND going wrong way result=0;
-      if(ray.dist > range) {result = -1; going=false;}  // Stop ray after traveling too far result=-1;
-    } //End While
-  return result;
-}
-
-*/
 // ------------------------------------------------------------------------ //
 
 //uint8_t texture_point(int8_t hit, int32_t x, int32_t y) {
@@ -445,7 +296,7 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
   if(view_border) {graphics_context_set_stroke_color(ctx, 1); graphics_draw_rect(ctx, GRect(view_x-1, view_y-1, view_w+2, view_h+2));}  //White Rectangle Border
   
   // Bring me the horizon
-  graphics_context_set_stroke_color(ctx, 1); graphics_draw_line(ctx, GPoint(view_x, view_y + view_h/2), GPoint(view_x + view_w,view_y + view_h/2));
+  //graphics_context_set_stroke_color(ctx, 1); graphics_draw_line(ctx, GPoint(view_x, view_y + view_h/2), GPoint(view_x + view_w,view_y + view_h/2));
    
   // Begin RayTracing Loop
   for(int16_t col = 0; col < view_w; col++) {
@@ -453,70 +304,83 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
     // note: above, when view_w becomes variable, this equation should be: angle=(fov * (col - (view_w<<1))) / view_w
 
     switch(shoot_ray(player.x, player.y, player.facing + angle)) {  //Shoot rays out of player's eyes.  pew pew.
-//    if(z!=0) { // If Z is non-zero
-    case -1:
-      //if(z==-1) {
-        graphics_context_set_stroke_color(ctx, 0); graphics_draw_pixel(ctx, GPoint(col + view_x, view_y + (view_h/2)));
+      //case -1:  // -1 means too far.  Draw black dot over the horizion
+      //  graphics_context_set_stroke_color(ctx, 0); graphics_draw_pixel(ctx, GPoint(col + view_x, view_y + (view_h/2)));
+      //break;
+      
+      case 0:  // 0 means out of bounds.  Draw horizion dot
+        graphics_draw_pixel(ctx, GPoint(col + view_x, view_y + (view_h/2)));
       break;
-      //} else {  //z=-1 means too far.  Draw black dot over the horizion
-        case 1:
-        z = (ray.dist * cos_lookup(angle)) / TRIG_MAX_RATIO;  // reuse z = distance
+      
+      case 1:  //1 means hit a block.  Draw the vertical line!
+        z = (ray.dist * cos_lookup(angle)) / TRIG_MAX_RATIO;  // z = distance
         if(z==0) z++; // If distance=0, make it 1 so divide by 0 doesn't happen later
         //Ray: x, y, dist, hit, offset
 
         // Draw Wall Column
        if(DRAWMODE_LINES) { // Begin Simple Lines Drawing
-          colheight = (view_h << 6)/ z; // Height of wall segment = view_h * wallheight * 64 / distance
+          colheight = (view_h << 6) / z; // Height of wall segment = view_h * wallheight * 64 / distance
           colbot = (view_h/2) + (colheight / 2);
           coltop = (view_h/2) - (colheight / 2);
+          //colbot = (view_h/2) + (colheight / 2); coltop = (view_h/2) - (colheight / 2);  // Normal
+          //colbot = (view_h/2) + (colheight*1/8); coltop = (view_h/2) - (colheight*7/8);  // Rodent
+		      //colbot = (view_h/2) + (colheight*7/8); coltop = (view_h/2) - (colheight*1/8);  // Flying
           if(ray.offset<4 || ray.offset > 60) graphics_context_set_stroke_color(ctx, 0); else   // Black edges on left and right 5% of block (Comment this line to remove edges)
             graphics_context_set_stroke_color(ctx, 1);
           graphics_draw_line(ctx, GPoint((int)col + view_x,coltop + view_y), GPoint((int)col + view_x,colbot + view_y));  //Draw the line
         } // End DrawMode Lines
-        
 
         if(DRAWMODE_TEXTURES) { // Begin Texture Drawing
           colheight = (view_h << 6)/ z;                                             // Height of wall segment
           if(colheight>view_h) colh=view_h/2; else colh=colheight/2; // Make sure line isn't drawn beyond bounding box
           
           // Next three lines are for tweaking shading
-          z -= 64; if (z<0) z=0;  // Make everything closer (solid white without having to be nearly touching)
-          z=sqrt_int(z) >> 1;     // Distance. z was 0-RANGE(aka 640), now z = 0 to 12: 0=close 10=distant.  Square Root makes it logarithmic
+          z -= 64; if (z<0) z=0;  // Make everything 1 block (64px) closer (solid white without having to be nearly touching)
+          z=sqrt_int(z,10) >> 1;     // z was 0-RANGE(max dist visible), now z = 0 to 12: 0=close 10=distant.  Square Root makes it logarithmic
           z -= 2; if (z<0) z=0;   // Closer still (zWas=zNow: 0-64=0, 65-128=2, 129-192=3, 256=4, 320=6, 384=6, 448=7, 512=8, 576=9, 640=10)
 
-          for(int32_t i=0; i<colh; i++) {
-            // Texture the Ray hit, point to 1st half of texture (64px x 64px texture menas 2 uint32_t per line)
-            switch(ray.hit) { // Convert this to an array of pointers in the future
-              case 1: target = (uint32_t*)wBrick->addr + ray.offset * 2; break;
-              case 2: target = (uint32_t*)wFifty->addr + ray.offset * 2; break;
-              case 3: target = (uint32_t*)wCircle->addr + ray.offset * 2; break;
-            }
+          // Texture the Ray hit, point to 1st half of texture (64px x 64px texture menas 2 uint32_t per line)
+          switch(ray.hit) { // Convert this to an array of pointers in the future
+            case 1: target = (uint32_t*)wBrick->addr + ray.offset * 2; break;
+            case 2: target = (uint32_t*)wFifty->addr + ray.offset * 2; break;
+            case 3: target = (uint32_t*)wCircle->addr + ray.offset * 2; break;
+          }
           
-            
-          //colbot = (view_h/2) + (colheight / 2); coltop = (view_h/2) - (colheight / 2);  // Normal
-          //colbot = (view_h/2) + (colheight*1/8); coltop = (view_h/2) - (colheight*7/8);  // Rodent
-		      //colbot = (view_h/2) + (colheight*7/8); coltop = (view_h/2) - (colheight*1/8);  // Flying
-
-            
-            // Draw Top Half
+          /*
+          graphics_context_set_stroke_color(ctx, 1);
+          for(int32_t i=0; i<colh; i++) {
+            // Wall is 64 pixels high, but textures are 32bit, so have to draw wall in halves
+            // Draw Top Half 
+            if( ((180-i) + (col*6)) % 9 >= z)    // Shading (Comment this line out to disable shading of top half)
+              if(((*target >> ((31-((i<<6)/colheight))))&1) > 0)
+                graphics_draw_pixel(ctx, GPoint(col+view_x, view_y + (view_h/2) - i ));
+          
+            // Draw Bottom Half
+            if( (i + (col*6)) %9 >= z)  // Shading (Comment this line out to disable shading of bottom half)
+              if(((*(target+1) >> ((i<<6)/colheight))&1) > 0)
+                graphics_draw_pixel(ctx, GPoint(col+view_x, view_y + (view_h/2) +  i));
+          }*/
+          
+          for(int32_t i=0; i<colh; i++) {
+            // Wall is 64 pixels high, but textures are 32bit, so have to draw wall in halves
+            // Draw Top Half 
             //if(((col*6) + 180 - i)%9<z) graphics_context_set_stroke_color(ctx, 0); else           // Shading (Comment this line out to disable shading)
-              graphics_context_set_stroke_color(ctx, ((*target>> ((31-((i<<6)/colheight))))&1));  // texture point = i*64/(colheight/2)
+              graphics_context_set_stroke_color(ctx, ((*target >> ((31-((i<<6)/colheight))))&1));  // texture point = i*64/(colheight/2)
               //graphics_context_set_stroke_color(ctx, texture_point(ray.hit, ray.offset, (i<<6)/colheight ));  // texture point = i*64/(colheight/2)
             graphics_draw_pixel(ctx, GPoint(col+view_x, view_y + (view_h/2) - i ));
           
             // Draw Bottom Half
-            target++; // Point to second half of texture
             //if((i+(col*6))%9<z) graphics_context_set_stroke_color(ctx, 0); else             // Shading (Comment this line out to disable shading)
-              graphics_context_set_stroke_color(ctx, ((*target >> ((i<<6)/colheight))&1));  // texture point = i*64/colheight
+              graphics_context_set_stroke_color(ctx, ((*(target+1) >> ((i<<6)/colheight))&1));  // texture point = i*64/colheight
             graphics_draw_pixel(ctx, GPoint(col+view_x, view_y + (view_h/2) +  i));
           }
+          
         } // End DrawMode Shaded Textures
-     // } //End Else Z = -1
-    } // End If(Z)
+    } // End Switch
   } //End For (End RayTracing Loop)
 
   time_ms(&sec2, &ms2);  //2nd Time Snapshot
-  dt = ((int32_t)1000*(int32_t)sec2 + (int32_t)ms2) - ((int32_t)1000*(int32_t)sec1 + (int32_t)ms1);  //ms between two time snapshots
+  dt = ((int32_t)1000*(int32_t)sec2 + (int32_t)ms2) - ((int32_t)1000*(int32_t)sec1 + (int32_t)ms1);  //dt=delta time: time between two time snapshots in milliseconds
   
   //-----------------//
   // Display TextBox //
@@ -532,15 +396,14 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
   }
   
   //-----------------//
-  //      Done!      //
-  //  Set a timer to //
-  //   restart loop  //
+  // Done!
   //-----------------//
-  if(dt<90 && dt>0) // Force 10FPS or worse
+  //  Set a timer to restart loop
+  
+  if(dt<90 && dt>0) // if time to render is less than 100ms, force framerate of 10FPS or worse
      app_timer_register(100-dt, main_loop, NULL); // 10FPS
   else
-     app_timer_register(10, main_loop, NULL);     // worse
-  //app_timer_register(ACCEL_STEP_MS, main_loop, NULL);
+     app_timer_register(10, main_loop, NULL);     // took longer than 100ms, loop asap (or in 10ms)
   
   // Perhaps clean up variables here?
 }
@@ -548,23 +411,19 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
 // ------------------------------------------------------------------------ //
 //  Button Click Handlers
 // ------------------------------------------------------------------------ //
-static void up_click_handler(ClickRecognizerRef recognizer, void *context) {// UP
-	//playerheight = playerheight + 1;	if(playerheight>view_h) playerheight=view_h;
+static void up_click_handler(ClickRecognizerRef recognizer, void *context) { // UP button was pressed
   view_h -= 2; if(view_h<2) view_h=2; else view_x += 1;
   view_w -= 2; if(view_w<2) view_w=2; else view_y += 1;
 }
 
-static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-  //text_layer_set_text(text_layer, "Select");
-  //window_set_background_color(window, rand()%2);
-  int32_t blockhit;
-  blockhit = shoot_ray(player.x, player.y, player.facing);         // Shoot Ray from center of screen
-  if(blockhit==1) setmap(floor_int(ray.x), floor_int(ray.y), 3);   // If Ray hit normal block(1), change it to a Circle Block (3) (Changed from Mirror Block(4), as it was confusing)
-  if(blockhit==3) setmap(floor_int(ray.x), floor_int(ray.y), 1);   // If Ray hit Circle Block(3), change it to a Normal Block (1)
+static void select_click_handler(ClickRecognizerRef recognizer, void *context) { // SELECT button was pressed
+  if(shoot_ray(player.x, player.y, player.facing)==1) {             // Shoot Ray from center of screen.  If it hit something:
+    if(ray.hit==1) setmap(floor_int(ray.x), floor_int(ray.y), 3);   // If Ray hit normal block(1), change it to a Circle Block (3) (Changed from Mirror Block(4), as it was confusing)
+    if(ray.hit==3) setmap(floor_int(ray.x), floor_int(ray.y), 1);   // If Ray hit Circle Block(3), change it to a Normal Block (1)
+  }
 }
 
-static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-	//playerheight = playerheight - 1;	if(playerheight<0) playerheight=0;
+static void down_click_handler(ClickRecognizerRef recognizer, void *context) { // DOWN button was pressed
   view_h += 2; if(view_h>180) view_h=180; else view_x -= 1;
   view_w += 2; if(view_w>150) view_w=150; else view_y -= 1;
 }
