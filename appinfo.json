@@ -9,6 +9,11 @@
     "resources": {
         "media": [
             {
+                "file": "images/brick-32.png",
+                "name": "WALL_BRICK32",
+                "type": "png"
+            },
+            {
                 "file": "images/3DICON.png",
                 "menuIcon": true,
                 "name": "ICON",
