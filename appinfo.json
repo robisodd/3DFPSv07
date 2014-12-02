@@ -9,8 +9,13 @@
     "resources": {
         "media": [
             {
-                "file": "images/brick-32.png",
-                "name": "WALL_BRICK32",
+                "file": "images/ceiling.png",
+                "name": "CEILING_LIGHTS",
+                "type": "png"
+            },
+            {
+                "file": "images/floor.png",
+                "name": "FLOOR_TILE",
                 "type": "png"
             },
             {

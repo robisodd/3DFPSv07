@@ -72,6 +72,9 @@
      bit7 traversable: 1 yes, 0 no  Note: Map needs to be initialized as -1, not 0.
      bit6 sprite here: 1 yes, 0 no  Note: Sprites only exist where traversable?
   
+  ERROR WITH CORNERS
+  
+  
   *********************************************************************************/
 // 529a7262-efdb-48d4-80d4-da14963099b9
 #include "pebble.h"
@@ -145,12 +148,12 @@ static RayStruct ray;
 static Window *window;
 static GRect window_frame;
 static Layer *graphics_layer;
-static bool bk_button_depressed = false;
 static bool up_button_depressed = false;
 static bool dn_button_depressed = false;
-static bool sl_button_depressed = false;
+//static bool sl_button_depressed = false;
+//static bool bk_button_depressed = false;
 
-GBitmap *wBrick, *wCircle, *wFifty, *wBrick32;
+GBitmap *wBrick, *wCircle, *wFifty;
 uint32_t *target;
 
 static int8_t map[mapsize * mapsize];  // int8 means cells can be from -128 to 127
@@ -229,33 +232,28 @@ static void main_loop(void *data) {
 //       ray.offset: horizontal spot on texture the ray hit [0-63]
 int32_t shoot_ray(int32_t x, int32_t y, int32_t angle) {
   int32_t sin, cos, dx, dy, nx, ny;
-  uint32_t Xlen, Ylen;
   
   sin = sin_lookup(angle);
-  cos = cos_lookup(angle); 
+  cos = cos_lookup(angle);
   ray = (RayStruct){.x=x, .y=y};
-
+    
   ny = sin>0 ? 64 : -1;
   nx = cos>0 ? 64 : -1;
-  if(sin==0) sin++; if(cos==0) cos++;  // Saves a lot of headache later and makes things faster
   
   while(true) {
     dy = ny - (ray.y&63);
-    Ylen = (dy << 16) / sin; // <<16 = * TRIG_MAX_RATIO
-
     dx = nx - (ray.x&63);
-    Xlen = (dx << 16) / cos;
-
-    if(Xlen < Ylen) {
+      
+    if(abs32(dx * sin) < abs32(dy * cos)) {
       ray.x += dx;
-      ray.y += (dx * sin) / cos;
+      ray.y += ((dx * sin) / cos);
       ray.hit = getmap(ray.x, ray.y);
       if(ray.hit > 0) {               // if ray hits a wall (a block)
         if(ray.hit == 4) {            // if it hit a [block type 4] = mirror block
           cos = -1 * cos;             // Bounce ray off mirror (ray will continue)
         } else {
           ray.offset = ray.y&63;      // Get offset: offset is where on wall ray hits: 0 (left edge) to 63 (right edge)
-          ray.dist = ((ray.x - x) * TRIG_MAX_RATIO) / cos; // Distance ray traveled
+          ray.dist = ((ray.x - x) << 16) / cos; // Distance ray traveled
           return 1;                   // Returning a "1" means "ray hit a wall"
         } // End else Mirror
       } // End if hit
@@ -268,7 +266,7 @@ int32_t shoot_ray(int32_t x, int32_t y, int32_t angle) {
           sin = -1 * sin;             // Bounce ray off mirror (ray will continue)
         } else {
          ray.offset = ray.x&63;        // Get offset: offset is where on wall ray hits: 0 (left edge) to 63 (right edge)
-         ray.dist = ((ray.y - y) * TRIG_MAX_RATIO) / sin; // Distance ray traveled
+         ray.dist = ((ray.y - y) << 16) / sin; // Distance ray traveled    <<16 = * TRIG_MAX_RATIO
          return 1;                     // Returning a "1" means "ray hit a wall"
         } // End else Mirror
       } // End if hit
@@ -342,7 +340,8 @@ void fill_window(GContext *ctx, uint8_t *data) {
 
 static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
   int32_t colheight, z, angle, colh;
-  time_t sec1, sec2; uint16_t ms1, ms2; int32_t dt; // time snapshot variables, to calculate render time and FPS
+  //time_t sec1, sec2; uint16_t ms1, ms2; int32_t dt; // time snapshot variables, to calculate render time and FPS
+  time_t sec1, sec2; uint16_t ms1, ms2, dt; // time snapshot variables, to calculate render time and FPS
   time_ms(&sec1, &ms1);  //1st Time Snapshot
   
   //-----------------//
@@ -360,7 +359,6 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
 
   for(int16_t col = 0; col < view_w; col++) {  // Begin RayTracing Loop
     angle = (fov * (col - (view_w>>1))) / view_w;
-    colheight = TRIG_MAX_RATIO * (view_h << 6) /  (ray.dist * cos_lookup(angle));  // Height of wall segment = view_h * wallheight * 64(the "zoom factor") / distance (distance =  ray.dist * cos_lookup(angle))
 
     switch(shoot_ray(player.x, player.y, player.facing + angle)) {  //Shoot rays out of player's eyes.  pew pew.
       case 0:  // 0 means out of map bounds, never hit anything.  Draw horizion dot
@@ -369,33 +367,35 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
       break;
       
       case 1:  //1 means hit a block.  Draw the vertical line!
-          if(colheight>view_h) colheight=view_h;   // Make sure line isn't drawn beyond bounding box
-          target = (uint32_t*)wBrick32->addr + (ray.offset&31);
+          colheight = TRIG_MAX_RATIO * (view_h << 6) /  (ray.dist * cos_lookup(angle));  // Height of wall segment = view_h * wallheight * 64(the "zoom factor") / distance (distance =  ray.dist * cos_lookup(angle))
+          if(colheight>view_h) colh=view_h/2; else colh=colheight/2;   // Make sure line isn't drawn beyond bounding box (also halve it cause of 2 32bit textures)
+      
+          // Texture the Ray hit, point to 1st half of texture (half, cause a 64x64px texture menas there's 2 uint32_t per row)
+          switch(ray.hit) { // Convert this to an array of pointers in the future
+            case 1: target = (uint32_t*)wBrick->addr + ray.offset * 2; break;
+            case 2: target = (uint32_t*)wFifty->addr + ray.offset * 2; break;
+            case 3: target = (uint32_t*)wCircle->addr + ray.offset * 2; break;
+          }
 
           uint32_t x, xaddr, xbit;
           x = col+view_x;  // X screen coordinate
           xaddr = x >> 5;  // X memory address
           xbit = (x & 31); // X bit shift level
-          
-          int32_t coltop, colbot;
-            colbot = (view_h/2) + (colheight / 2); coltop = (view_h/2) - (colheight / 2);
-          //colbot = (view_h/2) + (colheight / 2); coltop = (view_h/2) - (colheight / 2);     // Normal
-          //colbot = (view_h/2) + (colheight*1/8); coltop = (view_h/2) - (colheight*7/8);     // Rodent
-		      //colbot = (view_h/2) + (colheight*7/8); coltop = (view_h/2) - (colheight*1/8);     // Flying
-      
+
           // Note: "+="" addition only works on black background (assumes 0 in the bit position).
-          for(int32_t i=colbot; i<coltop; i++) {
+          for(int32_t i=0; i<colh; i++) {
             //yaddr = ((view_y + (view_h/2) -+ i) * 5);   // Y Address = Y screen coordinate * 5
             int32_t ch = (i * ray.dist * cos_lookup(angle)) / (TRIG_MAX_RATIO * view_h);
-            ((uint32_t*)(((GBitmap*)ctx)->addr))[((view_y + i) * 5) + xaddr] += (((*target >> (31-ch))&1) << xbit);  // Draw Top Half
-            ((uint32_t*)(((GBitmap*)ctx)->addr))[((view_y + i) * 5) + xaddr] += (((*target >> ch)&1) << xbit); // Draw Bottom Half
+            ((uint32_t*)(((GBitmap*)ctx)->addr))[((view_y + (view_h/2) - i) * 5) + xaddr] += (((*target >> (31-ch))&1) << xbit);  // Draw Top Half
+            ((uint32_t*)(((GBitmap*)ctx)->addr))[((view_y + (view_h/2) + i) * 5) + xaddr] += (((*(target+1)  >> ch)&1) << xbit);   // Draw Bottom Half
           }
       break;
     } // End Switch
   } //End For (End RayTracing Loop)
 
   time_ms(&sec2, &ms2);  //2nd Time Snapshot
-  dt = ((int32_t)1000*(int32_t)sec2 + (int32_t)ms2) - ((int32_t)1000*(int32_t)sec1 + (int32_t)ms1);  //dt=delta time: time between two time snapshots in milliseconds
+  dt = ((uint16_t)(1000*(sec2 - sec1))) + (ms2 - ms1);  //dt=delta time: time between two time snapshots in milliseconds
+  //dt = ((int32_t)1000*(int32_t)sec2 + (int32_t)ms2) - ((int32_t)1000*(int32_t)sec1 + (int32_t)ms1);  //dt=delta time: time between two time snapshots in milliseconds
   
   //-----------------//
   // Display TextBox //
@@ -405,7 +405,7 @@ static void graphics_layer_update_proc(Layer *me, GContext *ctx) {
     graphics_context_set_fill_color(ctx, 0);   graphics_fill_rect(ctx, textframe, 0, GCornerNone);  //Black Solid Rectangle
     graphics_context_set_stroke_color(ctx, 1); graphics_draw_rect(ctx, textframe);                //White Rectangle Border  
     static char text[40];  //Buffer to hold text
-    snprintf(text, sizeof(text), " (%ld,%ld) %ld %ldms %ldfps %d", player.x>>6, player.y>>6, player.facing, dt, 1000/dt, getmap(player.x,player.y));  // What text to draw
+    snprintf(text, sizeof(text), " (%ld,%ld) %ld %dms %dfps %d", player.x>>6, player.y>>6, player.facing, dt, 1000/dt, getmap(player.x,player.y));  // What text to draw
     graphics_context_set_text_color(ctx, 1);  // White Text
     graphics_draw_text(ctx, text, fonts_get_system_font(FONT_KEY_GOTHIC_14), textframe, GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);  //Write Text
   }
@@ -615,7 +615,6 @@ static void window_load(Window *window) {
   wBrick = gbitmap_create_with_resource(RESOURCE_ID_WALL_BRICK);
   wFifty = gbitmap_create_with_resource(RESOURCE_ID_WALL_FIFTY);
   wCircle = gbitmap_create_with_resource(RESOURCE_ID_WALL_CIRCLE);
-  wBrick32 = gbitmap_create_with_resource(RESOURCE_ID_WALL_BRICK32);
   Layer *window_layer = window_get_root_layer(window);
   window_frame = layer_get_frame(window_layer);
 
@@ -626,7 +625,6 @@ static void window_load(Window *window) {
 
 static void window_unload(Window *window) {
   layer_destroy(graphics_layer);
-  gbitmap_destroy(wBrick32);
   gbitmap_destroy(wBrick);
   gbitmap_destroy(wFifty);
   gbitmap_destroy(wCircle);
