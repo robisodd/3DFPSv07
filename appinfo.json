@@ -9,6 +9,11 @@
     "resources": {
         "media": [
             {
+                "file": "images/texture.png",
+                "name": "STONE",
+                "type": "png"
+            },
+            {
                 "file": "images/ceiling.png",
                 "name": "CEILING_LIGHTS",
                 "type": "png"
